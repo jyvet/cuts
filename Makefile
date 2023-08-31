@@ -1,8 +1,8 @@
 all:
-	nvcc -O3 cuts.cu -o cuts
+	nvcc -O3 -lnuma cuts.cu -o cuts
 
 debug:
-	nvcc -g cuts.cu -o cuts
+	nvcc -g -lnuma cuts.cu -o cuts
 
 clean:
 	@rm -f cuts

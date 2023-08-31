@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <cuda.h>
 #include <pthread.h>
+#include <numa.h>
 
 /* Expand macro values to string */
 #define STR_VALUE(var)  #var
@@ -51,14 +52,15 @@ const char * const ttype_str[] =
 
 typedef struct Transfer
 {
-    cudaEvent_t    start;   /* Start event for timing purpose                */
-    cudaEvent_t    stop;    /* Stop event for timing purpose                 */
-    int            device;  /* First (or single) device involved in transfer */
-    int            device2; /* Second device involved in the transfer        */
-    float         *dest;    /* Source buffer (host or GPU memory)            */
-    float         *src;     /* Destination buffer (host or GPU memory)       */
-    cudaStream_t   stream;  /* CUDA stream dedicated to the transfer         */
-    TransferType_t type;    /* Type and direction of the transfer            */
+    cudaEvent_t    start;     /* Start event for timing purpose                */
+    cudaEvent_t    stop;      /* Stop event for timing purpose                 */
+    int            device;    /* First (or single) device involved in transfer */
+    int            device2;   /* Second device involved in the transfer        */
+    float         *dest;      /* Source buffer (host or GPU memory)            */
+    float         *src;       /* Destination buffer (host or GPU memory)       */
+    cudaStream_t   stream;    /* CUDA stream dedicated to the transfer         */
+    TransferType_t type;      /* Type and direction of the transfer            */
+    int            numa_node; /* NUMA node locality                            */
 } Transfer_t;
 
 typedef struct Cuts
@@ -213,6 +215,8 @@ static struct argp argp = { options, parse_opt, args_doc, doc };
 
 static void _transfer_init_common(Transfer_t *t)
 {
+    t->numa_node = -1;
+
     checkCuda( cudaSetDevice(t->device) );
 
     checkCuda( cudaEventCreate(&t->start) );
@@ -221,17 +225,46 @@ static void _transfer_init_common(Transfer_t *t)
     checkCuda( cudaStreamCreateWithFlags(&t->stream, cudaStreamNonBlocking) );
 }
 
-void dtoh_transfer_init(Transfer_t *t, const size_t n_bytes)
+/**
+ * Set NUMA affinity based on GPU id.
+ *
+ * @param   t[in]  transfer structure
+ */
+void set_numa_affinity(Transfer_t *t) 
+{
+    char numa_file[PATH_MAX];
+    struct cudaDeviceProp prop;
+    checkCuda( cudaGetDeviceProperties(&prop, t->device) );
+    sprintf(numa_file, "/sys/class/pci_bus/0000:%.2x/device/numa_node", prop.pciBusID);
+
+    FILE* file = fopen(numa_file, "r");
+    if (file == NULL)
+        return;
+
+    int ret = fscanf(file, "%d", &t->numa_node);
+    fclose(file);
+
+    if (ret == 1)
+        numa_set_preferred(t->numa_node);
+}
+
+void dtoh_transfer_init(Transfer_t *t, const size_t n_bytes, const bool is_numa_aware)
 {
     _transfer_init_common(t);
+
+    if (is_numa_aware)
+        set_numa_affinity(t);
 
     checkCuda( cudaMalloc(((void **)&t->src), n_bytes) );
     checkCuda( cudaHostAlloc(((void **)&t->dest), n_bytes, cudaHostAllocDefault) );
 }
 
-void htod_transfer_init(Transfer_t *t, const size_t n_bytes)
+void htod_transfer_init(Transfer_t *t, const size_t n_bytes, const bool is_numa_aware)
 {
     _transfer_init_common(t);
+
+    if (is_numa_aware)
+        set_numa_affinity(t);
 
     checkCuda( cudaMalloc(((void **)&t->dest), n_bytes) );
     checkCuda( cudaHostAlloc(((void **)&t->src), n_bytes, cudaHostAllocDefault) );
@@ -274,10 +307,10 @@ void transfer_init(Cuts_t *cuts)
         switch(t->type)
         {
             case DTOH:
-                dtoh_transfer_init(t, cuts->n_size);
+                dtoh_transfer_init(t, cuts->n_size, cuts->is_numa_aware);
                 break;
             case HTOD:
-                htod_transfer_init(t, cuts->n_size);
+                htod_transfer_init(t, cuts->n_size, cuts->is_numa_aware);
                 break;
             case DTOD:
                 dtod_transfer_init(t, cuts->n_size);
@@ -350,7 +383,11 @@ void direct_transfer(Transfer_t *t, const size_t n_bytes, const size_t n_iter)
 {
     checkCuda( cudaSetDevice(t->device) );
 
-    printf("Launching %s transfers (Device %d)\n", ttype_str[t->type], t->device);
+    printf("Launching %s transfers with Device %d", ttype_str[t->type], t->device);
+    if (t->numa_node >= 0)
+        printf(" (Host buffer allocated on NUMA node %d)", t->numa_node);
+
+    printf("\n");
 
     checkCuda( cudaEventRecord(t->start, t->stream) );
 
