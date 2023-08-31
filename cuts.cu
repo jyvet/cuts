@@ -13,6 +13,7 @@
 #include <argp.h>
 #include <unistd.h>
 #include <cuda.h>
+#include <pthread.h>
 
 /* Expand macro values to string */
 #define STR_VALUE(var)  #var
@@ -343,7 +344,7 @@ void fini(Cuts_t *cuts)
  *
  * @param   t[inout]     Transfe data
  * @param   n_bytes[in]  Transfer size
- * @param   n_iter[out]  Iterations
+ * @param   n_iter[in]   Iterations
  */
 void direct_transfer(Transfer_t *t, const size_t n_bytes, const size_t n_iter)
 {
@@ -367,7 +368,7 @@ void direct_transfer(Transfer_t *t, const size_t n_bytes, const size_t n_iter)
  *
  * @param   t[inout]     Transfe data
  * @param   n_bytes[in]  Transfer size
- * @param   n_iter[out]  Iterations
+ * @param   n_iter[in]   Iterations
  */
 void dtod_transfer(Transfer_t *t, const size_t n_bytes, const size_t n_iter)
 {
@@ -386,6 +387,25 @@ void dtod_transfer(Transfer_t *t, const size_t n_bytes, const size_t n_iter)
     checkCuda( cudaEventRecord(t->stop, t->stream) );
 }
 
+/**
+ * Display a dot every second as Heartbeat. Stop when transfers are completed.
+ *
+ * @param   arg[in]  Pointer to transfer state
+ */
+void* heart_beat(void *arg)
+{
+    bool *is_transfering = (bool*)arg;
+    setbuf(stdout, NULL);
+
+    while (*is_transfering)
+    {
+        printf(".");
+	sleep(1);
+    }
+
+    return NULL;
+}
+
 int main(int argc, char *argv[])
 {
     Cuts_t cuts;
@@ -395,6 +415,8 @@ int main(int argc, char *argv[])
     const size_t n_iter = cuts.n_iter;
     const size_t n_bytes = cuts.n_size;
     const float n_gbytes = (float)n_bytes / 1E9;
+    bool is_transfering = true;
+    pthread_t thread;
 
     /* Start all transfers at the same time */
     for (int i = 0; i < n_transfers; i++)
@@ -402,6 +424,9 @@ int main(int argc, char *argv[])
         Transfer_t *t = &cuts.transfer[i];
         (t->type == DTOD) ? dtod_transfer(t, n_bytes, n_iter) : direct_transfer(t, n_bytes, n_iter);
     }
+
+    /* Starting heartbeat thread */
+    pthread_create(&thread, NULL, &heart_beat, &is_transfering);
 
     /* Synchronize the GPU from each transfer */
     for (int i = 0; i < n_transfers; i++)
@@ -411,6 +436,7 @@ int main(int argc, char *argv[])
         checkCuda( cudaDeviceSynchronize() );
     }
 
+    is_transfering = false;
     printf("\nCompleted.\n");
 
     /* Print bandwidth results */
@@ -420,7 +446,7 @@ int main(int argc, char *argv[])
         Transfer_t *t = &cuts.transfer[i];
         checkCuda( cudaSetDevice(t->device) );
         checkCuda( cudaEventElapsedTime(&dt_msec, t->start, t->stop) );
-        dt_sec = dt_msec / 1000;
+        dt_sec = dt_msec / 1E3;
 
         if (t->type == DTOD)
             printf("Transfer %d - P2P transfers from device %d to device %d: %.3f GB/s  (%.2f seconds)\n",
