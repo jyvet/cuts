@@ -18,7 +18,7 @@
 #define STR_VALUE(var)  #var
 #define STR(var)        STR_VALUE(var)
 
-#define N_SIZE_MAX      1073741824  /* 1GB */
+#define N_SIZE_MAX      1073741824  /* 1GiB */
 #define N_SIZE_DEFAULT  N_SIZE_MAX
 #define N_ITER_DEFAULT  100
 #define CUTS_VERSION    "cuts 1.0"
@@ -36,10 +36,17 @@ inline void assertCuda(cudaError_t code, const char *file, int line)
 
 typedef enum TransferType
 {
-    HTOD,  /* Host memory to Device (GPU)  */
-    DTOH,  /* Device (GPU) to Host memory  */
-    DTOD   /* Device (GPU) to Device (GPU) */
+    HTOD = 0,  /* Host memory to Device (GPU)  */
+    DTOH,      /* Device (GPU) to Host memory  */
+    DTOD,      /* Device (GPU) to Device (GPU) */
 } TransferType_t;
+
+const char * const ttype_str[] =
+{
+    "Host to Device",
+    "Device to Host",
+    "Device to Device",
+};
 
 typedef struct Transfer
 {
@@ -331,22 +338,96 @@ void fini(Cuts_t *cuts)
     free(cuts->transfer);
 }
 
+/**
+ * Launch a direct transfer stream (Host to Device or Device to Host)
+ *
+ * @param   t[inout]     Transfe data
+ * @param   n_bytes[in]  Transfer size
+ * @param   n_iter[out]  Iterations
+ */
+void direct_transfer(Transfer_t *t, const size_t n_bytes, const size_t n_iter)
+{
+    checkCuda( cudaSetDevice(t->device) );
+
+    printf("Launching %s transfers (Device %d)\n", ttype_str[t->type], t->device);
+
+    checkCuda( cudaEventRecord(t->start, t->stream) );
+
+    for (size_t i = 0; i < n_iter; i++)
+    {
+        checkCuda( cudaMemcpyAsync(t->dest, t->src, n_bytes, (t->type == DTOH) ?
+                                   cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice, t->stream) );
+    }
+
+    checkCuda( cudaEventRecord(t->stop, t->stream) );
+}
+
+/**
+ * Launch a peer-to-peer transfer stream
+ *
+ * @param   t[inout]     Transfe data
+ * @param   n_bytes[in]  Transfer size
+ * @param   n_iter[out]  Iterations
+ */
+void dtod_transfer(Transfer_t *t, const size_t n_bytes, const size_t n_iter)
+{
+    checkCuda( cudaSetDevice(t->device) );
+
+    printf("Launching P2P PCIe transfers from Device %d to Device %d\n",
+           t->device2, t->device);
+
+    checkCuda( cudaEventRecord(t->start, t->stream) );
+
+    for (size_t i = 0; i < n_iter; i++)
+    {
+        checkCuda( cudaMemcpyPeerAsync(t->dest, t->device, t->src, t->device2, n_bytes, t->stream) );
+    }
+
+    checkCuda( cudaEventRecord(t->stop, t->stream) );
+}
+
 int main(int argc, char *argv[])
 {
     Cuts_t cuts;
 
     init(argc, argv, &cuts);
+    const int n_transfers = cuts.n_transfers;
+    const size_t n_iter = cuts.n_iter;
+    const size_t n_bytes = cuts.n_size;
+    const float n_gbytes = (float)n_bytes / 1E9;
 
-    for (int i = 0; i < cuts.n_transfers; i++)
+    /* Start all transfers at the same time */
+    for (int i = 0; i < n_transfers; i++)
     {
         Transfer_t *t = &cuts.transfer[i];
+        (t->type == DTOD) ? dtod_transfer(t, n_bytes, n_iter) : direct_transfer(t, n_bytes, n_iter);
+    }
 
-        if (t[i].type == DTOD)
-            printf("Transfer %d - P2P transfers from device %d to device %d\n",
-                   i, t->device2, t->device);
+    /* Synchronize the GPU from each transfer */
+    for (int i = 0; i < n_transfers; i++)
+    {
+        Transfer_t *t = &cuts.transfer[i];
+        checkCuda( cudaSetDevice(t->device) );
+        checkCuda( cudaDeviceSynchronize() );
+    }
+
+    printf("\nCompleted.\n");
+
+    /* Print bandwidth results */
+    for (int i = 0; i < n_transfers; i++)
+    {
+        float dt_msec, dt_sec;
+        Transfer_t *t = &cuts.transfer[i];
+        checkCuda( cudaSetDevice(t->device) );
+        checkCuda( cudaEventElapsedTime(&dt_msec, t->start, t->stop) );
+        dt_sec = dt_msec / 1000;
+
+        if (t->type == DTOD)
+            printf("Transfer %d - P2P transfers from device %d to device %d: %.3f GB/s  (%.2f seconds)\n",
+                   i, t->device2, t->device, n_gbytes / dt_sec * n_iter, dt_sec);
         else
-            printf("Transfer %d - Direct transfers with device %d (%s)\n",
-                    i, t->device, (t->type) == DTOH ? "Device to Host" : "Host to Device");
+            printf("Transfer %d - Direct transfers with device %d (%s): %.3f GB/s  (%.2f seconds)\n",
+                   i, t->device, ttype_str[t->type], n_gbytes / dt_sec * n_iter, dt_sec);
     }
 
     fini(&cuts);
