@@ -24,6 +24,16 @@
 #define CUTS_VERSION    "cuts 1.0"
 #define CUTS_CONTACT    "https://github.com/jyvet/cuts"
 
+#define checkCuda(ret) { assertCuda((ret), __FILE__, __LINE__); }
+inline void assertCuda(cudaError_t code, const char *file, int line)
+{
+   if (code != cudaSuccess)
+   {
+      fprintf(stderr,"CheckCuda: %s %s %d\n", cudaGetErrorString(code), file, line);
+      exit(code);
+   }
+}
+
 typedef enum TransferType
 {
     HTOD,  /* Host memory to Device (GPU)  */
@@ -193,6 +203,81 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state)
 /* Argp parser */
 static struct argp argp = { options, parse_opt, args_doc, doc };
 
+static void _transfer_init_common(Transfer_t *t)
+{
+    checkCuda( cudaSetDevice(t->device) );
+
+    checkCuda( cudaEventCreate(&t->start) );
+    checkCuda( cudaEventCreate(&t->stop) );
+
+    checkCuda( cudaStreamCreateWithFlags(&t->stream, cudaStreamNonBlocking) );
+}
+
+void dtoh_transfer_init(Transfer_t *t, const size_t n_bytes)
+{
+    _transfer_init_common(t);
+
+    checkCuda( cudaMalloc(((void **)&t->src), n_bytes) );
+    checkCuda( cudaHostAlloc(((void **)&t->dest), n_bytes, cudaHostAllocDefault) );
+}
+
+void htod_transfer_init(Transfer_t *t, const size_t n_bytes)
+{
+    _transfer_init_common(t);
+
+    checkCuda( cudaMalloc(((void **)&t->dest), n_bytes) );
+    checkCuda( cudaHostAlloc(((void **)&t->src), n_bytes, cudaHostAllocDefault) );
+}
+
+void dtod_transfer_init(Transfer_t *t, const size_t n_bytes)
+{
+    _transfer_init_common(t);
+
+    /* Ensure peer-to-peer access is possible between the two GPUs */
+    int is_access = 0;
+    cudaDeviceCanAccessPeer(&is_access, t->device, t->device2);
+    if (!is_access)
+    {
+        fprintf(stderr, "Error: P2P cannot be enabled between devices %d and %d\n",
+                t->device, t->device2);
+        exit(1);
+    }
+
+    checkCuda( cudaSetDevice(t->device) );
+    checkCuda( cudaMalloc((void **)&t->dest, n_bytes) );
+    checkCuda( cudaDeviceEnablePeerAccess(t->device2, 0) );
+
+    checkCuda( cudaSetDevice(t->device2) );
+    checkCuda( cudaMalloc((void **)&t->src, n_bytes) );
+}
+
+/**
+ * Initialize all transfers
+ *
+ * @param   cuts[inout]  Main application structure
+ */
+void transfer_init(Cuts_t *cuts)
+{
+    /* Initialize all streams and buffers */
+    for (int i = 0; i < cuts->n_transfers; i++)
+    {
+        Transfer_t *t = &cuts->transfer[i];
+
+        switch(t->type)
+        {
+            case DTOH:
+                dtoh_transfer_init(t, cuts->n_size);
+                break;
+            case HTOD:
+                htod_transfer_init(t, cuts->n_size);
+                break;
+            case DTOD:
+                dtod_transfer_init(t, cuts->n_size);
+                break;
+        }
+    }
+}
+
 /**
  * Initialize the application
  *
@@ -216,6 +301,8 @@ void init(int argc, char *argv[], Cuts_t *cuts)
     cuts->is_numa_aware = true;
 
     argp_parse(&argp, argc, argv, 0, 0, cuts);
+
+    transfer_init(cuts);
 }
 
 /**
@@ -225,6 +312,22 @@ void init(int argc, char *argv[], Cuts_t *cuts)
  */
 void fini(Cuts_t *cuts)
 {
+    /* Free host buffers */
+    for (int i = 0; i < cuts->n_transfers; i++)
+    {
+        Transfer_t *t = &cuts->transfer[i];
+
+        switch(t->type)
+        {
+            case DTOH:
+                checkCuda( cudaFreeHost(t->dest) );
+                break;
+            case HTOD:
+                checkCuda( cudaFreeHost(t->src) );
+                break;
+        }
+    }
+
     free(cuts->transfer);
 }
 
