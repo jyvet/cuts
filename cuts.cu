@@ -230,7 +230,7 @@ static void _transfer_init_common(Transfer_t *t)
  *
  * @param   t[in]  transfer structure
  */
-void set_numa_affinity(Transfer_t *t) 
+void set_numa_affinity(Transfer_t *t)
 {
     char numa_file[PATH_MAX];
     struct cudaDeviceProp prop;
@@ -437,7 +437,7 @@ void* heart_beat(void *arg)
     while (*is_transfering)
     {
         printf(".");
-	sleep(1);
+        sleep(1);
     }
 
     return NULL;
