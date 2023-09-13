@@ -61,6 +61,8 @@ typedef struct Transfer
     cudaStream_t   stream;    /* CUDA stream dedicated to the transfer         */
     TransferType_t type;      /* Type and direction of the transfer            */
     int            numa_node; /* NUMA node locality                            */
+    struct cudaDeviceProp prop_device;
+    struct cudaDeviceProp prop_device2;
 } Transfer_t;
 
 typedef struct Cuts
@@ -122,6 +124,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state)
                 exit(1);
             }
 
+            transfer->device2 = -1;
             cuts->n_transfers++;
             break;
         case 'h':
@@ -134,6 +137,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state)
                 exit(1);
             }
 
+            transfer->device2 = -1;
             cuts->n_transfers++;
             break;
         case 'i':
@@ -217,6 +221,10 @@ static void _transfer_init_common(Transfer_t *t)
 {
     t->numa_node = -1;
 
+    checkCuda( cudaGetDeviceProperties(&t->prop_device, t->device) );
+    if (t->device2 >= 0)
+        checkCuda( cudaGetDeviceProperties(&t->prop_device2, t->device2) );
+
     checkCuda( cudaSetDevice(t->device) );
 
     checkCuda( cudaEventCreate(&t->start) );
@@ -226,16 +234,15 @@ static void _transfer_init_common(Transfer_t *t)
 }
 
 /**
- * Set NUMA affinity based on GPU id.
+ * Set NUMA affinity based on GPU property.
  *
  * @param   t[in]  transfer structure
  */
 void set_numa_affinity(Transfer_t *t)
 {
     char numa_file[PATH_MAX];
-    struct cudaDeviceProp prop;
-    checkCuda( cudaGetDeviceProperties(&prop, t->device) );
-    sprintf(numa_file, "/sys/class/pci_bus/0000:%.2x/device/numa_node", prop.pciBusID);
+    struct cudaDeviceProp *prop = &t->prop_device;
+    sprintf(numa_file, "/sys/class/pci_bus/0000:%.2x/device/numa_node", prop->pciBusID);
 
     FILE* file = fopen(numa_file, "r");
     if (file == NULL)
@@ -383,9 +390,10 @@ void direct_transfer(Transfer_t *t, const size_t n_bytes, const size_t n_iter)
 {
     checkCuda( cudaSetDevice(t->device) );
 
-    printf("Launching %s transfers with Device %d", ttype_str[t->type], t->device);
+    printf("Launching %s transfers with Device %d (0x%.2x)",
+           ttype_str[t->type], t->device, t->prop_device.pciBusID);
     if (t->numa_node >= 0)
-        printf(" (Host buffer allocated on NUMA node %d)", t->numa_node);
+        printf(" - Host buffer allocated on NUMA node %d", t->numa_node);
 
     printf("\n");
 
@@ -411,8 +419,8 @@ void dtod_transfer(Transfer_t *t, const size_t n_bytes, const size_t n_iter)
 {
     checkCuda( cudaSetDevice(t->device) );
 
-    printf("Launching P2P PCIe transfers from Device %d to Device %d\n",
-           t->device2, t->device);
+    printf("Launching P2P PCIe transfers from Device %d (0x%.2x) to Device %d (0x%.2x)\n",
+           t->device2, t->prop_device2.pciBusID, t->device, t->prop_device.pciBusID);
 
     checkCuda( cudaEventRecord(t->start, t->stream) );
 
@@ -486,11 +494,13 @@ int main(int argc, char *argv[])
         dt_sec = dt_msec / 1E3;
 
         if (t->type == DTOD)
-            printf("Transfer %d - P2P transfers from device %d to device %d: %.3f GB/s  (%.2f seconds)\n",
-                   i, t->device2, t->device, n_gbytes / dt_sec * n_iter, dt_sec);
+            printf("Transfer %d - P2P transfers from Device %d (0x%.2x) to Device %d (0x%.2x):"
+                   " %.3f GB/s  (%.2f seconds)\n", i, t->device2, t->prop_device2.pciBusID,
+                   t->device, t->prop_device.pciBusID, n_gbytes / dt_sec * n_iter, dt_sec);
         else
-            printf("Transfer %d - Direct transfers with device %d (%s): %.3f GB/s  (%.2f seconds)\n",
-                   i, t->device, ttype_str[t->type], n_gbytes / dt_sec * n_iter, dt_sec);
+            printf("Transfer %d - Direct transfers (%s) with Device %d (0x%.2x): "
+                   "%.3f GB/s  (%.2f seconds)\n", i, ttype_str[t->type],
+                   t->device, t->prop_device.pciBusID, n_gbytes / dt_sec * n_iter, dt_sec);
     }
 
     fini(&cuts);
