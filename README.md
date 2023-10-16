@@ -33,7 +33,7 @@ Arguments are :
     -n, --no-numa-affinity     Do not make the transfer buffers NUMA aware.
     -p, --dtod=<id,id>         Provide comma-separated GPU ids to specify which
                                pair of GPUs to use for peer to peer transfer.
-                               Firt id is the destination, second id is the
+                               First id is the destination, second id is the
                                source.
     -s, --size=<bytes>         Specify the transfer size in bytes. [default:
                                1073741824]

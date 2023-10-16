@@ -94,7 +94,7 @@ static struct argp_option options[] =
     {"htod",             'h', "<id>",    0,  "Provide GPU id for Host to Device transfer."},
     {"dtod",             'p', "<id,id>", 0,  "Provide comma-separated GPU ids to specify which "
                                              "pair of GPUs to use for peer to peer transfer. "
-                                             "Firt id is the destination, second id is the source."},
+                                             "First id is the destination, second id is the source."},
     {"iter",             'i', "<nb>",    0,  "Specify the amount of iterations. [default: "
                                               STR(N_ITER_DEFAULT) "]"},
     {"no-numa-affinity", 'n', 0,         0,  "Do not make the transfer buffers NUMA aware."},
