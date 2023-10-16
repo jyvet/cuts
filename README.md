@@ -11,7 +11,7 @@ Dependencies
 ------------
 
 * **cuda**
-* **libnuma** 
+* **libnuma**
 
 
 How to build CUts
@@ -23,7 +23,7 @@ How to build CUts
 How to run CUts
 ---------------
 
-    % ./cuts [ARGS...] 
+    % ./cuts [ARGS...]
 
 Arguments are :
 
@@ -45,18 +45,29 @@ Arguments are :
 Disabling NVLink to test PCIe P2P between GPUs
 ----------------------------------------------
 
-* Create a file /etc/modprobe.d/disable-nvlink.conf
+* Create a file */etc/modprobe.d/disable-nvlink.conf*
 * Add the following line:
 
     options nvidia NVreg_NvLinkDisable=1
 
+
 * reboot
+
+
+Disabling ACS
+-------------
+
+PCIe Bandwidth may be lower in case of data transfers between two devices
+connected to the same PCIe switch where Access Control Service (ACS) is enabled.
+Ensuring ACS is disabled on all PCIe devices:
+
+    for i in $(lspci | cut -f 1 -d " "); do setpci -v -s $i ecap_acs+6.w=0; done
 
 
 Examples
 --------
 
-PCIe P2P (NVLink disabled), both directions, between 2 GPUs connected to the same PCIe switch. ACS enabled:
+**PCIe P2P (NVLink disabled), both directions, between 2 GPUs connected to the same PCIe switch. ACS enabled:**
 
     % ./cuts --dtod=1,0 --dtod=0,1
     Launching P2P PCIe transfers from Device 0 to Device 1
@@ -67,9 +78,9 @@ PCIe P2P (NVLink disabled), both directions, between 2 GPUs connected to the sam
     Transfer 1 - P2P transfers from device 1 to device 0: 12.037 GB/s  (8.92 seconds)
 
 
-PCIe P2P (NVLink disabled), both directions, between 2 GPUs connected to the same PCIe switch. ACS disabled:
+**PCIe P2P (NVLink disabled), both directions, between 2 GPUs connected to the same PCIe switch. ACS disabled:**
 
-    % ./cuts --dtod=1,0 --dtod=0,1 
+    % ./cuts --dtod=1,0 --dtod=0,1
     Launching P2P PCIe transfers from Device 0 to Device 1
     Launching P2P PCIe transfers from Device 1 to Device 0
     ......
@@ -78,16 +89,16 @@ PCIe P2P (NVLink disabled), both directions, between 2 GPUs connected to the sam
     Transfer 1 - P2P transfers from device 1 to device 0: 19.448 GB/s  (5.52 seconds)
 
 
-Device to host direction with a single GPU:
+**Device to host direction with a single GPU:**
 
-    % ./cuts --dtoh=0 
+    % ./cuts --dtoh=0
     Launching Device to Host transfers with Device 0 (Host buffer allocated on NUMA node 3)
     .....
     Completed.
     Transfer 0 - Direct transfers with device 0 (Device to Host): 24.146 GB/s  (4.45 seconds)
 
 
-Host/Device transfers (both direction) from a single GPU:
+**Host/Device transfers (both direction) from a single GPU:**
 
     % ./cuts --dtoh=0 --htod=0
     Launching Device to Host transfers with Device 0 (Host buffer allocated on NUMA node 3)
@@ -98,7 +109,7 @@ Host/Device transfers (both direction) from a single GPU:
     Transfer 1 - Direct transfers with device 0 (Host to Device): 15.651 GB/s  (6.86 seconds)
 
 
-Device to host with two GPUs sharing same PCIe 4.0 switch (16x uplinks to root port):
+**Device to host with two GPUs sharing same PCIe 4.0 switch (16x uplinks to root port):**
 
     %./cuts --dtoh=0 --dtoh=1
     Launching Device to Host transfers with Device 0 (Host buffer allocated on NUMA node 3)
@@ -109,7 +120,7 @@ Device to host with two GPUs sharing same PCIe 4.0 switch (16x uplinks to root p
     Transfer 1 - Direct transfers with device 1 (Device to Host): 13.179 GB/s  (8.15 seconds)
 
 
-Combining several transfer types with 8 GPUs:
+**Combining several transfer types with 8 GPUs:**
 
     % ./cuts --dtoh=0 --htod=1 --dtoh=2 --htod=3 --dtoh=4 --htod=5 --dtod=6,7
     Launching Device to Host transfers with Device 0 (Host buffer allocated on NUMA node 3)
