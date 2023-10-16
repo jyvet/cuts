@@ -140,3 +140,8 @@ Examples
     Transfer 5 - Direct transfers with device 5 (Host to Device): 18.320 GB/s  (5.86 seconds)
     Transfer 6 - P2P transfers from device 7 to device 6: 24.411 GB/s  (4.40 seconds)
 
+
+HIP Version
+-----------
+
+To run on AMD GPUs, check the HIP version [HIts](https://github.com/jyvet/hits)
