@@ -23,7 +23,7 @@
 #define N_SIZE_MAX      1073741824  /* 1GiB */
 #define N_SIZE_DEFAULT  N_SIZE_MAX
 #define N_ITER_DEFAULT  100
-#define CUTS_VERSION    "cuts 1.0"
+#define CUTS_VERSION    "cuts 1.1"
 #define CUTS_CONTACT    "https://github.com/jyvet/cuts"
 
 #define checkCuda(ret) { assertCuda((ret), __FILE__, __LINE__); }
@@ -52,25 +52,26 @@ const char * const ttype_str[] =
 
 typedef struct Transfer
 {
-    cudaEvent_t    start;     /* Start event for timing purpose                */
-    cudaEvent_t    stop;      /* Stop event for timing purpose                 */
-    int            device;    /* First (or single) device involved in transfer */
-    int            device2;   /* Second device involved in the transfer        */
-    float         *dest;      /* Source buffer (host or GPU memory)            */
-    float         *src;       /* Destination buffer (host or GPU memory)       */
-    cudaStream_t   stream;    /* CUDA stream dedicated to the transfer         */
-    TransferType_t type;      /* Type and direction of the transfer            */
-    int            numa_node; /* NUMA node locality                            */
+    cudaEvent_t     start;      /* Start event for timing purpose                */
+    cudaEvent_t     stop;       /* Stop event for timing purpose                 */
+    int             device;     /* First (or single) device involved in transfer */
+    int             device2;    /* Second device involved in the transfer        */
+    float          *dest;       /* Source buffer (host or GPU memory)            */
+    float          *src;        /* Destination buffer (host or GPU memory)       */
+    cudaStream_t    stream;     /* CUDA stream dedicated to the transfer         */
+    TransferType_t  type;       /* Type and direction of the transfer            */
+    int             numa_node;  /* NUMA node locality                            */
+    bool            is_started; /* True if at least one stream event submitted   */
     struct cudaDeviceProp prop_device;
     struct cudaDeviceProp prop_device2;
 } Transfer_t;
 
 typedef struct Cuts
 {
-    Transfer_t *transfer;      /* Array containing all transfers to launch */
-    int         n_transfers;   /* Amount of transfers                      */
-    long        n_iter;        /* Amount of iterations for each transfer   */
-    long        n_size;        /* Transfer size in bytes                   */
+    Transfer_t *transfer;      /* Array containing all transfers to launch     */
+    int         n_transfers;   /* Amount of transfers                          */
+    long        n_iter;        /* Amount of iterations for each transfer       */
+    long        n_size;        /* Transfer size in bytes                       */
     bool        is_numa_aware; /* Allocate the buffers on the proper NUMA node */
 } Cuts_t;
 
@@ -219,7 +220,8 @@ static struct argp argp = { options, parse_opt, args_doc, doc };
 
 static void _transfer_init_common(Transfer_t *t)
 {
-    t->numa_node = -1;
+    t->numa_node  = -1;
+    t->is_started = false;
 
     checkCuda( cudaGetDeviceProperties(&t->prop_device, t->device) );
     if (t->device2 >= 0)
@@ -373,6 +375,8 @@ void fini(Cuts_t *cuts)
             case HTOD:
                 checkCuda( cudaFreeHost(t->src) );
                 break;
+            case DTOD:
+                break;
         }
     }
 
@@ -386,26 +390,28 @@ void fini(Cuts_t *cuts)
  * @param   n_bytes[in]  Transfer size
  * @param   n_iter[in]   Iterations
  */
-void direct_transfer(Transfer_t *t, const size_t n_bytes, const size_t n_iter)
+void direct_transfer(Transfer_t *t, const size_t n_bytes, const bool is_last_iter)
 {
     checkCuda( cudaSetDevice(t->device) );
 
-    printf("Launching %s transfers with Device %d (0x%.2x)",
-           ttype_str[t->type], t->device, t->prop_device.pciBusID);
-    if (t->numa_node >= 0)
-        printf(" - Host buffer allocated on NUMA node %d", t->numa_node);
-
-    printf("\n");
-
-    checkCuda( cudaEventRecord(t->start, t->stream) );
-
-    for (size_t i = 0; i < n_iter; i++)
+    if (!t->is_started)
     {
-        checkCuda( cudaMemcpyAsync(t->dest, t->src, n_bytes, (t->type == DTOH) ?
-                                   cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice, t->stream) );
+        printf("Launching %s transfers with Device %d (0x%.2x)",
+               ttype_str[t->type], t->device, t->prop_device.pciBusID);
+        if (t->numa_node >= 0)
+            printf(" - Host buffer allocated on NUMA node %d", t->numa_node);
+
+        printf("\n");
+
+        checkCuda( cudaEventRecord(t->start, t->stream) );
+        t->is_started = true;
     }
 
-    checkCuda( cudaEventRecord(t->stop, t->stream) );
+    checkCuda( cudaMemcpyAsync(t->dest, t->src, n_bytes, (t->type == DTOH) ?
+                               cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice, t->stream) );
+
+    if (is_last_iter)
+        checkCuda( cudaEventRecord(t->stop, t->stream) );
 }
 
 /**
@@ -415,21 +421,23 @@ void direct_transfer(Transfer_t *t, const size_t n_bytes, const size_t n_iter)
  * @param   n_bytes[in]  Transfer size
  * @param   n_iter[in]   Iterations
  */
-void dtod_transfer(Transfer_t *t, const size_t n_bytes, const size_t n_iter)
+void dtod_transfer(Transfer_t *t, const size_t n_bytes, const bool is_last_iter)
 {
     checkCuda( cudaSetDevice(t->device) );
 
-    printf("Launching P2P PCIe transfers from Device %d (0x%.2x) to Device %d (0x%.2x)\n",
-           t->device2, t->prop_device2.pciBusID, t->device, t->prop_device.pciBusID);
-
-    checkCuda( cudaEventRecord(t->start, t->stream) );
-
-    for (size_t i = 0; i < n_iter; i++)
+    if (!t->is_started)
     {
-        checkCuda( cudaMemcpyPeerAsync(t->dest, t->device, t->src, t->device2, n_bytes, t->stream) );
+        printf("Launching P2P PCIe transfers from Device %d (0x%.2x) to Device %d (0x%.2x)\n",
+               t->device2, t->prop_device2.pciBusID, t->device, t->prop_device.pciBusID);
+
+        checkCuda( cudaEventRecord(t->start, t->stream) );
+        t->is_started = true;
     }
 
-    checkCuda( cudaEventRecord(t->stop, t->stream) );
+    checkCuda( cudaMemcpyPeerAsync(t->dest, t->device, t->src, t->device2, n_bytes, t->stream) );
+
+    if (is_last_iter)
+        checkCuda( cudaEventRecord(t->stop, t->stream) );
 }
 
 /**
@@ -444,8 +452,8 @@ void* heart_beat(void *arg)
 
     while (*is_transfering)
     {
-        printf(".");
         sleep(1);
+        printf(".");
     }
 
     return NULL;
@@ -463,15 +471,19 @@ int main(int argc, char *argv[])
     bool is_transfering = true;
     pthread_t thread;
 
-    /* Start all transfers at the same time */
-    for (int i = 0; i < n_transfers; i++)
-    {
-        Transfer_t *t = &cuts.transfer[i];
-        (t->type == DTOD) ? dtod_transfer(t, n_bytes, n_iter) : direct_transfer(t, n_bytes, n_iter);
-    }
-
     /* Starting heartbeat thread */
     pthread_create(&thread, NULL, &heart_beat, &is_transfering);
+
+    /* Start all transfers at the same time */
+    for (size_t i = 0; i < n_iter; i++)
+    {
+        const bool is_last = (i == n_iter - 1);
+        for (int j = 0; j < n_transfers; j++)
+        {
+            Transfer_t *t = &cuts.transfer[j];
+            (t->type == DTOD) ? dtod_transfer(t, n_bytes, is_last) : direct_transfer(t, n_bytes, is_last);
+        }
+    }
 
     /* Synchronize the GPU from each transfer */
     for (int i = 0; i < n_transfers; i++)
